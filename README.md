@@ -35,7 +35,39 @@ You need a 2764 EPROM (8Kx8, 28-pin DIP) and a programmer such as a TL866II Plus
 
 The program is entirely standalone and does not call any KERNAL routines.
 
-A `*` in the display means that matrix intersection is closed (key pressed). The `SCAN:` line shows the scan code of the first detected key, computed as `column * 8 + row_bit_position`.
+Each cell in the 8x8 grid shows one of three states:
+
+| Symbol | Meaning |
+|---|---|
+| `*` | Key is pressed **right now** (live). This always shows, so retesting an already-tested key still flags up. |
+| (blank) | Key has been pressed at least once and is now released — i.e. it has been "ticked off". |
+| `.` | Key has **never** been pressed since power-on. |
+
+This makes coverage testing easy: work through the keyboard and watch the dots disappear. When you have pressed every key, any remaining `.` marks the intersections that never registered — those are the keys (or matrix lines) to investigate.
+
+The persistent state is held in an 8-byte "seen" bitmap in the tape buffer at `$0340`. To reset it, just reset/power-cycle the machine.
+
+The `SCAN:` line shows the scan code of the first detected key, computed as `column * 8 + row_bit_position`.
+
+### RESTORE
+
+The **RESTORE** key is not part of the 8x8 matrix — it is wired to the CA1 input of VIA #1, which is the machine's NMI source. It therefore has its own `RESTORE:` line, using the same `*` / blank / `.` coverage convention as the grid.
+
+Rather than taking an actual NMI, the program disables VIA #1 interrupts and polls the CA1 edge flag (`$911D` bit 1) once per scan. Because the flag is edge-latched, even a brief tap is caught, and clearing it after each read re-arms detection so repeated presses keep registering.
+
+### Joystick
+
+The control port is read once per scan and shown on the `JOYSTICK:` line as five lettered cells — `U` `D` `L` `R` `F` — each using the same `*` / blank / `.` coverage convention. The switches are active-low and split across both VIAs:
+
+| Direction | Register | Bit |
+|---|---|---|
+| Up | VIA1 PA `$9111` | 2 |
+| Down | VIA1 PA `$9111` | 3 |
+| Left | VIA1 PA `$9111` | 4 |
+| Fire | VIA1 PA `$9111` | 5 |
+| Right | VIA2 PB `$9120` | 7 |
+
+Right shares its line with keyboard column 7, so to read it the program briefly switches `VIA2 DDRB` bit 7 to input, samples `$9120`, then restores the column as an output. In VICE, enable a joystick on the control port and map it to test (Settings → Joystick).
 
 ## Modifying
 

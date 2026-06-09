@@ -74,6 +74,7 @@ class Asm6502:
     def eor_imm(self, v):   self._imm(0x49, v)
 
     def lda_zp(self, z):    self._zp(0xA5, z)
+    def ora_zp(self, z):    self._zp(0x05, z)
     def sta_zp(self, z):    self._zp(0x85, z)
     def stx_zp(self, z):    self._zp(0x86, z)
     def sty_zp(self, z):    self._zp(0x84, z)
@@ -140,6 +141,12 @@ VIA2_PA   = 0x9121
 VIA2_DDRB = 0x9122
 VIA2_DDRA = 0x9123
 
+# VIA #1 — the NMI VIA. The RESTORE key is wired to its CA1 input.
+VIA1_PA   = 0x9111     # port A (reading clears the CA1 interrupt flag)
+VIA1_PCR  = 0x911C     # peripheral control (CA1 active edge select)
+VIA1_IFR  = 0x911D     # interrupt flag register (bit 1 = CA1)
+VIA1_IER  = 0x911E     # interrupt enable register
+
 SCREEN    = 0x1E00     # screen memory (unexpanded)
 COLRAM    = 0x9600     # colour RAM
 ROW       = 22         # columns per row
@@ -156,6 +163,16 @@ ZP_MASK   = 0x50       # column select mask
 ZP_HIT    = 0x51       # hit flag
 ZP_SCODE  = 0x52       # scan code
 ZP_TMP    = 0x53
+ZP_SEENB  = 0x54       # working copy of this column's "seen" byte
+ZP_RSEEN  = 0x55       # RESTORE key "ever pressed" flag
+ZP_JSEEN  = 0x56       # joystick "ever pressed" bitmap (b0=U b1=D b2=L b3=F b4=R)
+ZP_JNOW   = 0x57       # joystick "pressed now" bitmap (same bit layout)
+
+# Persistent "ever pressed" bitmap: 8 bytes (one per column), bit set once a
+# key has been pressed at least once. Lives in the tape buffer, which is unused
+# because we never touch the KERNAL. RAM is random at power-up so it is cleared
+# during init.
+SEEN      = 0x0340
 
 # Screen code helpers
 def sc(char):
@@ -169,7 +186,7 @@ def sc(char):
     elif c == ord('-'): return 0x2D
     elif c == ord('.'): return 0x2E
     elif c == ord('*'): return 0x2A
-    elif c == ord(':'): return 0x1B
+    elif c == ord(':'): return 0x3A   # screen code for ':' (0x1B is '[')
     elif c == ord('$'): return 0x24
     elif c == ord(' '): return 0x20
     else: return 0x20
@@ -224,6 +241,14 @@ a.sta_absx(COLRAM + 0x100)
 a.dex()
 a.bne('clr_col')
 
+# ---- Clear the persistent "seen" bitmap (8 bytes) ----
+a.lda_imm(0)
+a.ldx_imm(7)
+a.label('clr_seen')
+a.sta_absx(SEEN)
+a.dex()
+a.bpl('clr_seen')
+
 # ---- Write title to screen memory ----
 title_text = "HENRYTESTS"
 for i, ch in enumerate(title_text):
@@ -258,9 +283,39 @@ for i, ch in enumerate(scan_text):
     a.lda_imm(sc(ch))
     a.sta_abs(scan_row + i)
 
+# Write "RESTORE:" label on row 14 (not part of the matrix; polled separately)
+restore_row = SCREEN + 14 * ROW
+restore_text = "RESTORE:"
+for i, ch in enumerate(restore_text):
+    a.lda_imm(sc(ch))
+    a.sta_abs(restore_row + i)
+
+# ---- Joystick: label on row 16, a lettered cell per direction on row 17 ----
+# Each entry: (letter, "pressed" bitmask, screen-cell offset within row 17).
+# The cell sits immediately after its letter; bit layout matches ZP_JNOW/ZP_JSEEN.
+joy_dirs = [('U', 0x01, 1), ('D', 0x02, 4), ('L', 0x04, 7),
+            ('R', 0x10, 10), ('F', 0x08, 13)]
+
+joy_lbl_row = SCREEN + 16 * ROW
+for i, ch in enumerate("JOYSTICK:"):
+    a.lda_imm(sc(ch))
+    a.sta_abs(joy_lbl_row + i)
+
+joy_row = SCREEN + 17 * ROW
+for letter, mask, off in joy_dirs:
+    a.lda_imm(sc(letter))
+    a.sta_abs(joy_row + off - 1)   # letter immediately before its cell
+
 # ---- Set up VIA for keyboard scanning ----
 a.lda_imm(0xFF);  a.sta_abs(VIA2_DDRB)  # PB = output (columns)
 a.lda_imm(0x00);  a.sta_abs(VIA2_DDRA)  # PA = input  (rows)
+
+# ---- Set up VIA #1 for RESTORE polling (no interrupts) ----
+a.lda_imm(0x7F);  a.sta_abs(VIA1_IER)   # disable all VIA1 interrupts (no NMI)
+a.lda_imm(0x00);  a.sta_abs(VIA1_PCR)   # CA1 active edge = falling (RESTORE down)
+a.lda_abs(VIA1_PA)                       # read PA to clear any pending CA1 flag
+a.lda_imm(0x00);  a.sta_zp(ZP_RSEEN)    # RESTORE not yet seen
+a.sta_zp(ZP_JSEEN)                       # joystick not yet seen (A still 0)
 
 # ============================================================
 # MAIN LOOP - scan keyboard and update screen directly
@@ -286,20 +341,36 @@ a.lda_zp(ZP_MASK)
 a.sta_abs(VIA2_PB)
 a.nop(); a.nop(); a.nop(); a.nop()
 
-# Read rows, invert
+# Read rows, invert (1 = key pressed)
 a.lda_abs(VIA2_PA)
 a.eor_imm(0xFF)
 a.sta_zp(ZP_ROW)
 
-# Write 8 dots/stars to screen at (ZP_SL/SH),Y
+# Fold this scan's pressed keys into the persistent "seen" bitmap for the
+# column, and keep a working copy (ZP_SEENB) for the display loop below.
+a.lda_zp(ZP_COL)
+a.tax()
+a.lda_absx(SEEN)
+a.ora_zp(ZP_ROW)
+a.sta_absx(SEEN)
+a.sta_zp(ZP_SEENB)
+
+# Write 8 cells to screen at (ZP_SL/SH),Y. For each key:
+#   '*'  pressed right now (always wins, so retesting still flags)
+#   ' '  pressed before but released now (checked off)
+#   '.'  never pressed (stays visible until tested)
 a.ldy_imm(0)       # Y = offset within row (starting at col 3)
 a.ldx_imm(8)       # bit counter
 
 a.label('bit_lp')
-a.asl_zp(ZP_ROW)
-a.lda_imm(0x2E)    # '.' screen code
+a.lda_imm(0x2E)    # '.' default: never pressed
+a.asl_zp(ZP_SEENB) # C = has this key ever been pressed?
+a.bcc('bit_notseen')
+a.lda_imm(0x20)    # ' ' seen before, not pressed now
+a.label('bit_notseen')
+a.asl_zp(ZP_ROW)   # C = pressed right now?
 a.bcc('put_bit')
-a.lda_imm(0x2A)    # '*' screen code
+a.lda_imm(0x2A)    # '*' pressed now (overrides)
 a.label('put_bit')
 a.sta_zpiy(ZP_SL)  # STA (ZP_SL),Y
 a.iny()
@@ -404,7 +475,7 @@ a.sta_abs(scan_val_addr + 1)
 
 a.lda_imm(0x20)
 a.sta_abs(scan_val_addr + 2)
-a.jmp_l('scan_delay')
+a.jmp_l('restore_chk')
 
 a.label('show_none')
 a.lda_imm(0x2D)     # '-'
@@ -412,6 +483,62 @@ a.sta_abs(scan_val_addr)
 a.sta_abs(scan_val_addr + 1)
 a.lda_imm(0x20)
 a.sta_abs(scan_val_addr + 2)
+
+# ---- Poll RESTORE (VIA #1 CA1 edge) ----
+# Edge-latched: a set CA1 flag means RESTORE was pressed since the last poll.
+# Same coverage display as the matrix keys:
+#   '*'  pressed since last scan   ' '  pressed before   '.'  never pressed
+restore_cell = SCREEN + 14 * ROW + 9   # after "RESTORE: "
+a.label('restore_chk')
+a.lda_abs(VIA1_IFR)
+a.and_imm(0x02)         # CA1 flag
+a.beq('rest_seen_chk')
+a.lda_abs(VIA1_PA)      # read PA to clear the CA1 flag (re-arm for next press)
+a.lda_imm(1); a.sta_zp(ZP_RSEEN)
+a.lda_imm(0x2A)         # '*'
+a.bne('rest_put')       # A != 0 -> always taken
+a.label('rest_seen_chk')
+a.lda_zp(ZP_RSEEN)
+a.beq('rest_never')
+a.lda_imm(0x20)         # ' ' seen before, not now
+a.bne('rest_put')       # A != 0 -> always taken
+a.label('rest_never')
+a.lda_imm(0x2E)         # '.' never pressed
+a.label('rest_put')
+a.sta_abs(restore_cell)
+
+# ---- Read joystick (VIA1 PA bits 2-5 + VIA2 PB7) ----
+# Build ZP_JNOW with pressed=1: b0=Up b1=Down b2=Left b3=Fire b4=Right.
+a.lda_abs(VIA1_PA)      # Up/Down/Left/Fire are PA bits 2-5, active low
+a.eor_imm(0xFF)         # pressed = 1
+a.lsr_a(); a.lsr_a()    # shift bits 2-5 down to bits 0-3
+a.and_imm(0x0F)         # b0=Up b1=Down b2=Left b3=Fire
+a.sta_zp(ZP_JNOW)
+# Right is on VIA2 PB7, which is normally a keyboard column output.
+a.lda_imm(0x7F); a.sta_abs(VIA2_DDRB)   # make PB7 an input
+a.lda_abs(VIA2_PB)
+a.eor_imm(0xFF)         # pressed = 1
+a.and_imm(0x80)         # keep bit 7 (Right)
+a.lsr_a(); a.lsr_a(); a.lsr_a()         # bit7 -> bit4 ($80 -> $10)
+a.ora_zp(ZP_JNOW)
+a.sta_zp(ZP_JNOW)
+a.lda_imm(0xFF); a.sta_abs(VIA2_DDRB)   # restore all columns to output
+# Fold into the persistent joystick "seen" bitmap.
+a.lda_zp(ZP_JSEEN); a.ora_zp(ZP_JNOW); a.sta_zp(ZP_JSEEN)
+
+# Display the 5 direction cells with the usual coverage convention.
+for idx, (letter, mask, off) in enumerate(joy_dirs):
+    a.lda_zp(ZP_JNOW); a.and_imm(mask)
+    a.beq(f'j_seen{idx}')
+    a.lda_imm(0x2A); a.bne(f'j_put{idx}')   # '*' pressed now
+    a.label(f'j_seen{idx}')
+    a.lda_zp(ZP_JSEEN); a.and_imm(mask)
+    a.beq(f'j_never{idx}')
+    a.lda_imm(0x20); a.bne(f'j_put{idx}')   # ' ' seen before
+    a.label(f'j_never{idx}')
+    a.lda_imm(0x2E)                          # '.' never
+    a.label(f'j_put{idx}')
+    a.sta_abs(joy_row + off)
 
 a.label('scan_delay')
 # Brief delay
