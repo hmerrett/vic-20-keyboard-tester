@@ -23,7 +23,7 @@ python3 assemble.py
 
 This produces `kbtest.bin`, `kbtest.prg`, and `kbtest.hex` in the current directory.
 
-Note: the VIC chip registers are set for PAL timing. 
+Works on both PAL and NTSC machines. At power-on the program watches one frame of the raster counter (`$9004`) to tell a PAL VIC (312 lines) from an NTSC one (261 lines), then sets the matching screen position. On NTSC the animation and sounds run a little faster and lower in pitch, because of the 60Hz frame rate and slightly slower clock. 
 
 ## Burning to EPROM
 

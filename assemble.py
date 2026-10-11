@@ -166,6 +166,12 @@ VIC_VOICE3 = 0x900C    # soprano voice (bit 7 = on, bits 0-6 = pitch)
 VIC_VOLUME = 0x900E    # bits 7-4 aux colour, bits 3-0 volume
 VIC_COLOUR = 0x900F    # bits 7-4 background, bit 3 normal video, bits 2-0 border
 
+# Screen origin ($9000/$9001) for each VIC chip, as the stock KERNALs set it.
+# Index 0 = NTSC (6560), 1 = PAL (6561).
+H_ORIGIN  = [0x05, 0x0C]
+V_ORIGIN  = [0x19, 0x26]
+PAL_RASTER = 136       # $9004 only gets this high on PAL (312 lines; NTSC has 261)
+
 # Colours
 BLACK, WHITE, RED, CYAN, PURPLE, GREEN, BLUE, YELLOW = range(8)
 NORMAL_SCREEN = 0x08 | BLUE    # black background, blue border
@@ -349,10 +355,27 @@ a.cld()
 a.ldx_imm(0xFF)
 a.txs()
 
+# ---- PAL or NTSC? ----
+# $9004 holds the raster line / 2, so watch one frame: only a PAL chip ever
+# reaches PAL_RASTER before the beam returns to the top.
+a.label('tv_top')
+a.lda_abs(VIC_RASTER)
+a.bne('tv_top')         # wait for the top of a frame...
+a.label('tv_leave')
+a.lda_abs(VIC_RASTER)
+a.beq('tv_leave')       # ...and for the beam to move on
+a.ldx_imm(0)            # X = 0: NTSC unless the beam gets far enough
+a.label('tv_scan')
+a.lda_abs(VIC_RASTER)
+a.beq('tv_found')       # back at the top: NTSC
+a.cmp_imm(PAL_RASTER)
+a.bcc('tv_scan')
+a.inx()                 # X = 1: PAL
+a.label('tv_found')
+
 # ---- Initialise VIC chip registers ----
-# PAL values
-a.lda_imm(0x0C);  a.sta_abs(0x9000)    # horiz origin (PAL)
-a.lda_imm(0x26);  a.sta_abs(0x9001)    # vert origin  (PAL)
+a.lda_absx_l('h_origin'); a.sta_abs(0x9000)    # horiz origin for this chip
+a.lda_absx_l('v_origin'); a.sta_abs(0x9001)    # vert origin for this chip
 a.lda_imm(0x96);  a.sta_abs(0x9002)    # 22 cols + video addr bit
 a.lda_imm(0xAE);  a.sta_abs(0x9003)    # 23*2 rows, 8x8 chars
 a.lda_imm(0xF0);  a.sta_abs(0x9005)    # screen=$1E00, chars=$8000
@@ -793,6 +816,9 @@ a.jmp_l('main_loop')
 # ============================================================
 # Data tables
 # ============================================================
+a.label('h_origin'); a.byte(*H_ORIGIN)
+a.label('v_origin'); a.byte(*V_ORIGIN)
+
 a.label('hex_tbl')
 # Screen codes for '0'-'9','A'-'F'
 for c in '0123456789ABCDEF':
