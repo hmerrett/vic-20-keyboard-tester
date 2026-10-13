@@ -3,7 +3,8 @@
 HenryTests VIC-20 Keyboard Matrix Tester - Retro Hardware Discord edition
 Writes directly to VIC chip registers and screen memory.
 No CHROUT, no KERNAL init, no dependency on anything except hardware.
-Output: kbtest.bin (8192 bytes, $A000-$BFFF)
+Output: kbtest.bin        (8192 bytes, $A000-$BFFF) cartridge ROM
+        kbtest-kernal.bin (8192 bytes, $E000-$FFFF) replacement KERNAL ROM
 """
 
 class Asm6502:
@@ -138,6 +139,18 @@ class Asm6502:
         self.resolve()
         with open(fn, 'wb') as f:
             f.write(self.rom)
+
+    def relocated(self, origin):
+        """A copy of the program moved to another origin. Every reference to a
+        label goes through a fixup, so re-resolving them is all it takes."""
+        r = Asm6502(origin, len(self.rom))
+        r.rom[:] = self.rom
+        r.pc = self.pc - self.origin + origin
+        r.labels = {name: addr - self.origin + origin
+                    for name, addr in self.labels.items()}
+        r.fixups = list(self.fixups)
+        r.resolve()
+        return r
 
 
 # ====================================================================
@@ -860,6 +873,26 @@ a.label('col_img')
 a.byte(*col_img)
 
 # ============================================================
+# KERNAL ROM version
+# ============================================================
+# The same program moved to $E000 so it can replace the KERNAL ROM. The CPU's
+# reset vector then starts the tester directly: no cartridge, and no working
+# KERNAL, needed. The cartridge header means nothing there, so it's blanked.
+KERNAL = 0xE000
+NO_IRQ = 0xFFF9        # an RTI just below the CPU vectors
+
+k = a.relocated(KERNAL)
+header_len = k.labels['entry'] - KERNAL
+k.rom[:header_len] = bytes([0xFF] * header_len)
+assert k.pc <= NO_IRQ, "program runs into the KERNAL vectors"
+k.rom[NO_IRQ - KERNAL] = 0x40   # RTI: interrupts stay off, this just catches strays
+for vector, addr in ((0xFFFA, NO_IRQ),              # NMI
+                     (0xFFFC, k.labels['entry']),   # RESET
+                     (0xFFFE, NO_IRQ)):             # IRQ / BRK
+    k.rom[vector - KERNAL] = addr & 0xFF
+    k.rom[vector - KERNAL + 1] = addr >> 8
+
+# ============================================================
 # Done
 # ============================================================
 end = a.pc
@@ -867,6 +900,19 @@ used = end - a.origin
 print(f"Code:  ${a.origin:04X}-${end-1:04X}  ({used} bytes)")
 print(f"ROM:   $A000-$BFFF  (8192 bytes)")
 print(f"Free:  {8192 - used} bytes")
+
+def write_hex(rom, fn):
+    """Intel HEX, addressed from the start of the ROM."""
+    lines = []
+    for i in range(0, len(rom), 16):
+        chunk = rom[i:i+16]
+        rec = [len(chunk), (i >> 8) & 0xFF, i & 0xFF, 0x00] + list(chunk)
+        cksum = (~sum(rec) + 1) & 0xFF
+        lines.append(':' + ''.join(f'{b:02X}' for b in rec) + f'{cksum:02X}')
+    lines.append(':00000001FF')
+    with open(fn, 'w') as f:
+        f.write('\n'.join(lines) + '\n')
+    print(f"Written: {fn}")
 
 a.save("kbtest.bin")
 print("Written: kbtest.bin")
@@ -877,14 +923,9 @@ with open("kbtest.prg", "wb") as f:
     f.write(a.rom)
 print("Written: kbtest.prg (with $A000 load address header for VICE)")
 
-# Intel HEX
-lines = []
-for i in range(0, len(a.rom), 16):
-    chunk = a.rom[i:i+16]
-    rec = [len(chunk), (i >> 8) & 0xFF, i & 0xFF, 0x00] + list(chunk)
-    cksum = (~sum(rec) + 1) & 0xFF
-    lines.append(':' + ''.join(f'{b:02X}' for b in rec) + f'{cksum:02X}')
-lines.append(':00000001FF')
-with open("kbtest.hex", 'w') as f:
-    f.write('\n'.join(lines) + '\n')
-print("Written: kbtest.hex")
+write_hex(a.rom, "kbtest.hex")
+
+with open("kbtest-kernal.bin", "wb") as f:
+    f.write(k.rom)
+print(f"Written: kbtest-kernal.bin (replacement KERNAL, starts at ${k.labels['entry']:04X})")
+write_hex(k.rom, "kbtest-kernal.hex")

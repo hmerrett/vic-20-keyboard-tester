@@ -1,6 +1,6 @@
 # HenryTests VIC-20 Keyboard Tester
 
-VIC-20 keyboard matrix tester ROM cartridge, in Retro Hardware Discord (RHD) colours. Scans the 8x8 keyboard matrix via VIA #2 hardware and displays column/row state in real time on screen. Completely standalone with no KERNAL dependency.
+VIC-20 keyboard matrix tester, in Retro Hardware Discord (RHD) colours, built both as a ROM cartridge and as a replacement KERNAL ROM. Scans the 8x8 keyboard matrix via VIA #2 hardware and displays column/row state in real time on screen. Completely standalone with no KERNAL dependency.
 
 The screen has a colour-cycling RHD logo and rainbow stripe, the live matrix grid, the name of the key being held, RESTORE and joystick status, and a progress bar counting up to all 65 keys.
 
@@ -12,6 +12,8 @@ The screen has a colour-cycling RHD logo and rainbow stripe, the live matrix gri
 | `kbtest.bin` | Raw 8K ROM image (8192 bytes, maps to $A000-$BFFF). Burn this to an EPROM. |
 | `kbtest.prg` | Same ROM with a 2-byte $A000 load address header prepended (8194 bytes). For VICE. |
 | `kbtest.hex` | Intel HEX format of the ROM image. For EPROM programmers that prefer HEX input. |
+| `kbtest-kernal.bin` | The same program as a replacement KERNAL ROM (8192 bytes, maps to $E000-$FFFF). Boots straight into the tester. |
+| `kbtest-kernal.hex` | Intel HEX format of the KERNAL ROM image. |
 
 ## Building from Source
 
@@ -21,7 +23,7 @@ The only dependency is Python 3 (any version from 3.6 onwards).
 python3 assemble.py
 ```
 
-This produces `kbtest.bin`, `kbtest.prg`, and `kbtest.hex` in the current directory.
+This produces `kbtest.bin`, `kbtest.prg`, `kbtest.hex`, `kbtest-kernal.bin` and `kbtest-kernal.hex` in the current directory.
 
 Works on both PAL and NTSC machines. At power-on the program watches one frame of the raster counter (`$9004`) to tell a PAL VIC (312 lines) from an NTSC one (261 lines), then sets the matching screen position. On NTSC the animation and sounds run a little faster and lower in pitch, because of the 60Hz frame rate and slightly slower clock. 
 
@@ -29,13 +31,25 @@ Works on both PAL and NTSC machines. At power-on the program watches one frame o
 
 You need a 2764 EPROM (8Kx8, 28-pin DIP) and a programmer such as a TL866II Plus, MiniPro, or similar.
 
+### As a cartridge
+
 1. Program and verify `kbtest.bin` to the EPROM.
 2. Fit the EPROM into a VIC-20 cartridge PCB wired for the $A000 block (active on BLK5, the standard 8K auto-start slot).
+
+### As a KERNAL ROM
+
+The KERNAL version boots straight into the tester at power-on, so no cartridge is needed. It's also handy when the machine's own KERNAL ROM is suspect.
+
+1. Program and verify `kbtest-kernal.bin` to the EPROM.
+2. Fit it in place of the VIC-20's KERNAL ROM. That chip is a 24-pin 2364, so a 28-pin 2764 needs a 2364-to-2764 adapter.
+3. Refit the original KERNAL afterwards: without it the machine can't start BASIC.
+
+In VICE, run it with `xvic -kernal kbtest-kernal.bin` (no cartridge). VICE warns about an unknown Kernal image, which is expected.
 
 
 ## How It Works
 
-The program is entirely standalone and does not call any KERNAL routines. The main loop is locked to the frame rate: it waits for the raster to reach the top of the screen, then scans and redraws, so updates never tear.
+The program is entirely standalone and does not call any KERNAL routines, which is also what lets it run in place of the KERNAL. The main loop is locked to the frame rate: it waits for the raster to reach the top of the screen, then scans and redraws, so updates never tear.
 
 Each grid row is one keyboard column (`C0`-`C7`, driven on VIA2 PB). Its eight cells are the row bits read back on VIA2 PA, bit 7 on the left to bit 0 on the right (numbered in the header), followed by the raw row byte in hex. Each cell shows one of three states:
 
@@ -80,3 +94,5 @@ Port A is read through `$911F`, the no-handshake mirror of `$9111`, because read
 ## Modifying
 
 Everything is in `assemble.py`. The `Asm6502` class at the top is a minimal 6502 assembler. The static screen (logo, labels, colours) is laid out next with `put()` calls into a screen image and colour image, which the ROM copies into place at start-up. The program itself follows as a sequence of method calls. Rebuild with `python3 assemble.py`.
+
+Both ROM images come from the same code. The KERNAL version is the cartridge program relocated to `$E000` (every label reference goes through a fixup, so relocating is exact). Its cartridge header is blanked, and the 6502's NMI, RESET and IRQ vectors are added at `$FFFA`: RESET points at the program, and NMI and IRQ point at an `RTI`.
