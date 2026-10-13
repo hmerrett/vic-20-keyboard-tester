@@ -4,6 +4,8 @@ VIC-20 keyboard matrix tester, in Retro Hardware Discord (RHD) colours, built bo
 
 The screen has a colour-cycling RHD logo and rainbow stripe, the live matrix grid, the name of the key being held, RESTORE and joystick status, and a progress bar counting up to all 65 keys.
 
+![The tester part-way through a test: 44 of 65 keys done, RETURN held down](screenshot.png)
+
 ## Files
 
 | File | Description |
@@ -96,3 +98,7 @@ Port A is read through `$911F`, the no-handshake mirror of `$9111`, because read
 Everything is in `assemble.py`. The `Asm6502` class at the top is a minimal 6502 assembler. The static screen (logo, labels, colours) is laid out next with `put()` calls into a screen image and colour image, which the ROM copies into place at start-up. The program itself follows as a sequence of method calls. Rebuild with `python3 assemble.py`.
 
 Both ROM images come from the same code. The KERNAL version is the cartridge program relocated to `$E000` (every label reference goes through a fixup, so relocating is exact). Its cartridge header is blanked, and the 6502's NMI, RESET and IRQ vectors are added at `$FFFA`: RESET points at the program, and NMI and IRQ point at an `RTI`.
+
+## Credits
+
+Thanks to Pete (@diceman) for contributing ideas.
